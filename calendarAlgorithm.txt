@@ -1,0 +1,91 @@
+Jan Feb March April May June July August Sep Oct Nov Dec
+31  28  31    30    31  30   31   31     30  31  30  31 
+
+DayOfYear getMonth(int millisecondsIntoYear)
+{
+  // blah blah blah
+}
+
+void calcTime(int milliseconds) // milliseconds from year born
+{
+  // divide by milli/year
+  // ...
+  // left with milli left over a year
+  // 
+  // get current date 
+  
+
+  March 23, 2014 --> June 15, 2015
+
+  Subtract years worth of milliseconds
+
+  get how many days in march  <-- how to get march?? (function above)
+    ^^ Use array of ints (size 12), index into array the month number (monthIndex) and get 31 days back 
+  0 + 31 - 23 = 8
+  ^ current sum
+  decrement milliseconds by number of milliseconds in current month
+  if (numMilliseconds left < num milli in current month) break
+  increment month index
+
+  get how many days in april (adding  month)
+  8 + 30 = 38 
+  ^ current sum
+  increment month if the sum is greater than 31 (monthIndex - 1)
+  decrement milliseconds by number of milliseconds in current month
+  if (numMilliseconds left < num milli in current month) break
+  increment month index
+
+  Add how many days in June
+  38 + 15 
+  ^ current sum
+  increment month if the sum is greater than 31 (monthIndex - 1)
+  decrement milliseconds by number of milliseconds in current month
+  if (numMilliseconds left < num milli in current month) break
+
+ 
+
+  
+
+
+  
+}
+
+void calcMonth(int numDaysSinceBirthdate, int monthIndex, int dayOfBirthMonth, int [] monthsToDays)
+{
+  March 23, 2015 --> May 16, 2015
+
+  Answer: 1 Month, 24 days
+ 
+  // numDaysSinceBirthdate = 53
+  // monthIndex = 3
+  // dayOfBirthMonth = 23 
+
+  Jan Feb March April May June July August Sep Oct Nov Dec
+  31  28  31    30    31  30   31   31     30  31  30  31 
+
+          |   6 - 2     | 
+    *         .             . *   // 1 days
+  . . . . | . . . . . . | . . . |
+
+  // numDaysSinceBirthdate = 11 --> 13 --> 9 --> 3 --> 0
+  // monthIndex = 1 --> 2 --> 3 --> 4
+  // dayOfBirthMonth = 2
+  //
+  // retDays = 0 --> 13 --> 9 --> 3
+  // retMonthDiff = -1 --> 0 --> 1 --> 2
+
+  int retMonthDiff = -1;
+  int retDays = 0;
+  numDaysSinceBirthdate += dayOfBirthMonth;
+  while (numDaysSinceBirthdate > 0)
+  {
+    retDays = numDaysSinceBirthdate;
+    numDaysSinceBirthdate -= monthsToDays[monthIndex];
+
+    retMonthDiff++;
+    monthIndex = (monthIndex + 1) % 12;
+  }
+  
+  int daysBetweenMonth = monthsToDays[retMonth] - dayOfBirthMonth + retDays;
+  int monthsBetween = retMonthDiff;
+}
