@@ -1,0 +1,9 @@
+It is always difficult to debug a crash when the top stack in the backtrace contains a message to a class in a 3rd party framework-- code that you can't step through.  
+In one example, OS X developers may come across a crash when calling the objc_retain, which is made as part of Apple's ARC (Automatic Reference Counting).  
+This talk will go through the steps of debugging the cause for this crash; primarily by using the Xcode disassembler, to follow along with the assembly that is being executed at the time of a crash.  We will also be monitoring the objects in the registers, and covering the reasoning behind calls that the compiler automatically generates for us.  This talk will not require any experience with Objective-C or the Cocoa framework, and any pertinent concepts related to those will be broken down.
+
+[If a talk on Chrome Extensions is more desired]
+Looking for a side project that has a lot of space for ideas, and is very easy to reach a huge group of users?  You should try publishing a Google Chrome Extension!
+Almost 50% of the market uses Google Chrome, and publishing to the web store is entirely free.
+I will go over how to create a New Tab Extension, using Javascript && two frameworks; Handlebars for templating, and Magnific for a popup.  I'll also show some Chrome APIs that an extension can leverage to utilize browser features.  
+I will also go through process behind publishing your extension.  Sans the coding, the entire process only takes a few minutes.  If you already have an idea, you could publish something before the end of the day ^^
