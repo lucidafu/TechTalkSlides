@@ -1,0 +1,394 @@
+
+So in Snagit Mac, we have had 9 crashes from the CenterCode Beta (150-odd users), in EditorWindowController.m, `-setCurrentDocument`
+This seems really frequent, so I decided to dive in and try to figure out what was going on.
+
+Here are the crash report descriptions:
+
+	Snagit crashed after finishing recording a 44 sec video capture (of a youtube video) and waiting for the editor to appear. Received a dialog that snagit crashed and asked if I wanted to reopen the app and report the error (which I am doing right now).
+
+	Decided to test Snagit Beta, opened Snagit Beta, attempted screen capture, selected with area, selected capture: attempted save, app crashed and snagit quit. 
+	On 1st attempt, this occurred. On 2nd attempt, it happened again, only faster. I'm going to reboot my computer and start over. Thanks . Mary
+
+	Attempted to close and reopen editor within Snagit.
+
+	I believe I was trying to capture a panoramic
+
+	Simply trying to effectively use the webcam capture mode, and it crashes;
+
+	Simply opening the editor;
+
+
+Here is the stack trace during the crash (Thanks HockeyApp!):
+0   libobjc.A.dylib                      0x00007fff904ac064 objc_retain + 20
+1   Snagit                               0x0000000102032c85 -[EditorWindowController setCurrentDocument:] (EditorWindowController.m:518)
+2   Foundation                           0x00007fff8717fe6b _NSSetObjectValueAndNotify + 258
+3   Snagit                               0x000000010203287b -[EditorWindowController selectTrayItem:shouldDisplay:] (EditorWindowController.m:468)
+4   Snagit                               0x0000000102032548 -[EditorWindowController setDocumentAtIndex:] (EditorWindowController.m:398)
+5   Snagit                               0x0000000102031afd -[EditorWindowController displayEditor] (EditorWindowController.m:223)
+6   Snagit                               0x000000010204d2fd -[AppController showEditor:] (AppController.m:1469)
+7   Snagit                               0x000000010204abc0 -[AppController application:openFile:] (AppController.m:852)
+
+I personally was unable to reproduce this even once with the same stack trace, but I did find another way to reproduce the crash w/ this stack trace:
+
+0   libobjc.A.dylib                      0x00007fff8caa2064 objc_retain + 20
+1   Snagit                               0x000000010f9f7865 -[EditorWindowController setCurrentDocument:] (EditorWindowController.m:518)
+2   Foundation                           0x00007fff95762f3b _NSSetObjectValueAndNotify + 258
+3   Snagit                               0x000000010f9f745b -[EditorWindowController selectTrayItem:shouldDisplay:] (EditorWindowController.m:468)
+4   Snagit                               0x000000010fa49138 -[TrayManager selectTrayItem:shouldDisplay:] (TrayManager.m:380)
+5   Snagit                               0x000000010fa48a6e -[TrayManager documentAdded:shouldSelect:atIndex:] (TrayManager.m:295)
+6   Snagit                               0x000000010f9ff083 -[EditorDocumentController addDocument:shouldSwitch:atIndex:] (EditorDocumentController.m:572)
+7   AppKit                               0x00007fff8b8fab47 -[NSDocumentController openUntitledDocumentAndDisplay:error:] + 339
+8   Snagit                               0x000000010f9f6749 -[EditorWindowController displayEditor] (EditorWindowController.m:229)
+9   Snagit                               0x000000010fa0f706 -[AppController applicationShouldHandleReopen:hasVisibleWindows:] (AppController.m:880)
+
+For any Snagit Mac users that are curious how to reproduce it the way I did-- simply delete all items inside of your Library.  There will be a leftover empty item.  Delete that, and Snagit will close.  Reopen Snagit and you receive this crash.
+
+During debug you will see that the crash is a EXC_BAD_ACCESS.  So normally you would think that we are trying to access an object that has already been released (Thanks ARC!).  But the processor in this case would have sent a Segmentation Fault Signal (sigsegv), which it didn't. 
+
+The logs say that the crash was caused by a Bus Error:
+Exception Type:  SIGBUS
+Exception Codes: BUS_ADRERR at 0x0
+Crashed Thread:  0
+
+So the processor is sending an error to the OS telling it that it is trying to access an invalid physical address.
+
+So what's happening here?  How can we debug this?  The only information we have right now is what is in the stack trace.
+
+At the moment of the crash, the top stack frame (Frame 0) is this call to `objc_retain
+0   libobjc.A.dylib                      0x00007fff904ac064 objc_retain + 20
+
+And according to the stack trace, the caller to objc_retain is -[EditorWindowController setCurrentDocument:].
+But let's look at the code here:
+
+- (void)setCurrentDocument:(MediaDocument*)document
+{
+   if (![document isEqual:[self currentDocument]])
+   {
+      if ([_editorViewController isLibraryVisible])
+      {
+         [super setDocument:document];
+      }
+      else
+      {
+         [self setDocument:document];
+      }
+      [document didFinishSettingDocument];
+   }
+}
+
+- (MediaDocument*)currentDocument
+{
+   return [self document];
+}
+
+Note that in Objective-C, instance variables can have getters and setters automatically generated by denoting a @property variable.  
+e.g, @property ImageDocument *currentDocument;
+And we still have the ability to implement the accessors (getters/setters) ourselves, by writing a method called currentDocument (getter) and setCurrentDocument (setter).  So when you try to set a property, the objc runtime will search for the "set*yourpropertyname*" method to see if you have a custom implementation.  Otherwise it will just directly set the backing instance variable.
+
+
+Also to those of you unfamiliar w/ Objective-C and how their memory management (ARC) works (ARC), whenever you obtain a reference to an object that you only use in a given scope-- that object will be added to the autorelease pool, which periodically drains automatically (more specifically, at the end of a main run loop).  However, if you want to say, set the object as a property on an object, then you will need to `retain` the object, to prevent it from being automatically released before you reference it again.  
+
+But when you look at that code, it doesn't seem like it would need to call `-retain` anywhere.  Well, turns out, the ARC compiler adds some magical instructions into the assembly code.  Let's take a look at the pertinent assembly code produced from Xcode's disassembler.  
+
+    0x100105dc0 <+0>:   pushq  %rbp
+    0x100105dc1 <+1>:   movq   %rsp, %rbp
+    0x100105dc4 <+4>:   subq   $0x40, %rsp
+    0x100105dc8 <+8>:   leaq   -0x18(%rbp), %rax
+    0x100105dcc <+12>:  movq   %rdi, -0x8(%rbp)
+    0x100105dd0 <+16>:  movq   %rsi, -0x10(%rbp)
+    0x100105dd4 <+20>:  movq   $0x0, -0x18(%rbp)
+    0x100105ddc <+28>:  movq   %rax, %rdi
+    0x100105ddf <+31>:  movq   %rdx, %rsi
+    0x100105de2 <+34>:  callq  0x1004a289a               ; symbol stub for: objc_storeStrong
+    0x100105de7 <+39>:  movq   -0x18(%rbp), %rax
+    0x100105deb <+43>:  movq   -0x8(%rbp), %rdx
+    0x100105def <+47>:  movq   0x523ad2(%rip), %rsi      ; "currentDocument"
+    0x100105df6 <+54>:  movq   %rdx, %rdi
+    0x100105df9 <+57>:  movq   %rax, -0x30(%rbp)
+    0x100105dfd <+61>:  callq  0x1004a2834               ; symbol stub for: objc_msgSend
+    0x100105e02 <+66>:  movq   %rax, %rdi
+->  0x100105e05 <+69>:  callq  0x1004a286a               ; symbol stub for: objc_retainAutoreleasedReturnValue
+    0x100105e0a <+74>:  movq   %rax, %rdx
+    0x100105e0d <+77>:  movq   0x524c6c(%rip), %rsi      ; "isEqual:"
+    0x100105e14 <+84>:  movq   -0x30(%rbp), %rdi
+    0x100105e18 <+88>:  movq   %rax, -0x38(%rbp)
+    0x100105e1c <+92>:  callq  0x1004a2834               ; symbol stub for: objc_msgSend
+    0x100105e21 <+97>:  cmpb   $0x0, %al
+    0x100105e23 <+99>:  setne  %al
+    0x100105e26 <+102>: xorb   $0x1, %al
+    0x100105e28 <+104>: movq   -0x38(%rbp), %rdx
+    0x100105e2c <+108>: movq   %rdx, %rdi
+    0x100105e2f <+111>: movb   %al, -0x39(%rbp)
+    0x100105e32 <+114>: callq  0x1004a2852               ; symbol stub for: objc_release
+    0x100105e37 <+119>: movb   -0x39(%rbp), %al
+    0x100105e3a <+122>: testb  $0x1, %al
+    0x100105e3c <+124>: jne    0x100105e47               ; <+135> at EditorWindowController.m:516
+    0x100105e42 <+130>: jmp    0x100105ec9               ; <+265> at EditorWindowController.m:524
+
+The first thing you will notice is that at no point is objc_retain ever called.  So we are looking at tail call elimination at work (stack frames get popped as an optimization strategy), and if you're observant you'll notice the method `objc_retainAutoreleasedReturnValue`.  It's probably safe to assume, for now, that the `retain` call is being made inside of that function.
+
+And indeed, if we dive into the assembly for `objc_retainAutoreleasedReturnValue`, we find this:
+libobjc.A.dylib`objc_retainAutoreleasedReturnValue:
+    0x7fff8caa6fc8 <+0>:  movq   %gs:0x160, %rax
+    0x7fff8caa6fd1 <+9>:  cmpq   %rdi, %rax
+    0x7fff8caa6fd4 <+12>: je     0x7fff8caa6fdb            ; <+19>
+->  0x7fff8caa6fd6 <+14>: jmp    0x7fff8caa2050            ; objc_retain
+    0x7fff8caa6fdb <+19>: movq   $0x0, %gs:0x160
+    0x7fff8caa6fe8 <+32>: movq   %rdi, %rax
+    0x7fff8caa6feb <+35>: retq   
+
+There's the $$$
+
+So our *True* stack trace should look like this:
+0   libobjc.A.dylib                      0x00007fff8caa2064 objc_retain + 20
+*   libobjc.A.dylib                      0x00007fff8caaXXXX objc_retainAutoreleasedReturnValue + X
+1   Snagit                               0x000000010f9f7865 -[EditorWindowController setCurrentDocument:] (EditorWindowController.m:518)
+
+
+And in fact, if we disassemble the machine code, we see that `objc_retain + 20` is specifically this instruction:
+
+    0x7fff8caa2064 <+20>: testb  $0x2, 0x20(%rax)
+
+For reference, here is the entire assembly for `objc_retain`:
+
+libobjc.A.dylib`objc_retain:
+    0x7fff8caa2050 <+0>:  xorl   %eax, %eax
+    0x7fff8caa2052 <+2>:  testq  %rdi, %rdi
+    0x7fff8caa2055 <+5>:  je     0x7fff8caa2060            ; <+16>
+    0x7fff8caa2057 <+7>:  testb  $0x1, %dil
+    0x7fff8caa205b <+11>: je     0x7fff8caa2061            ; <+17>
+    0x7fff8caa205d <+13>: movq   %rdi, %rax
+    0x7fff8caa2060 <+16>: retq   
+    0x7fff8caa2061 <+17>: movq   (%rdi), %rax
+->  0x7fff8caa2064 <+20>: testb  $0x2, 0x20(%rax)
+    0x7fff8caa2068 <+24>: je     0x7fff8caa206f            ; <+31>
+    0x7fff8caa206a <+26>: jmp    0x7fff8caba3c4            ; objc_object::sidetable_retain()
+    0x7fff8caa206f <+31>: leaq   -0x143ee59e(%rip), %rax   ; SEL_retain
+    0x7fff8caa2076 <+38>: movq   (%rax), %rsi
+    0x7fff8caa2079 <+41>: jmp    0x7fff8ca9a0c0            ; objc_msgSend
+
+
+And there it is; when the assembly dereferences the rax register(and for whatever reason, with an 0x20 offset), the SIGBUS is thrown.
+Side note, notice that the rax register is actually the value of the dereferenced rdi register, one instruction prior.
+
+This can be confirmed by checking out the registers before that instruction is executed:
+       rax = 0xbaddc0dedeadbead
+       rbx = 0x00006000001c03c0
+       rcx = 0x0000000000000035
+       rdx = 0x00006000001c03c0
+       rdi = 0x00006180001864c0
+       rsi = 0x00007fff8c0f8bfc  "document"
+       rbp = 0x00007fff5fbfe4a0
+       rsp = 0x00007fff5fbfe468
+        r8 = 0x000000000000007f
+        r9 = 0x0000600000185bd0
+       r10 = 0x000000010303f1c0
+       r11 = 0x0000618000085780
+       r12 = 0x00006180000857a8
+       r13 = 0x0000000100558640  @"currentDocument"
+       r14 = 0x00007fff8ca9a0c0  libobjc.A.dylib`objc_msgSend
+       r15 = 0x00000001004f12c2  "setCurrentDocument:"
+       rip = 0x00007fff8caa2064  libobjc.A.dylib`objc_retain + 20
+    rflags = 0x0000000000000246
+        cs = 0x000000000000002b
+        fs = 0x0000000000000000
+        gs = 0x0000000000000000
+
+You'll notice immediately that the "address" doesn't look normal.  I didn't know this prior, but the x86 ISA uses "Canonical Addresses".  So virtual addresses don't use all 64 bits of address space, they actually only use 48 of the least significant bits. 
+That's why valid addresses normally look like 0x0000123412341234 or 0xFFFF823412341234.  Note that the most significant 16 bits repeat the 48th significant bit
+
+So it's pretty clear that somehow, some garbage was stored in the rax register, and when `testb` tries to dereference the address at rax, we get the error.
+
+So let's try to figure out where this is happening, and go back to the assembly for `-setCurrentDocument`:
+
+    ...
+    0x100105de2 <+34>:  callq  0x1004a289a               ; symbol stub for: objc_storeStrong
+    0x100105de7 <+39>:  movq   -0x18(%rbp), %rax
+    0x100105deb <+43>:  movq   -0x8(%rbp), %rdx
+    0x100105def <+47>:  movq   0x523ad2(%rip), %rsi      ; "currentDocument"
+    0x100105df6 <+54>:  movq   %rdx, %rdi
+    0x100105df9 <+57>:  movq   %rax, -0x30(%rbp)
+    0x100105dfd <+61>:  callq  0x1004a2834               ; symbol stub for: objc_msgSend
+    0x100105e02 <+66>:  movq   %rax, %rdi
+->  0x100105e05 <+69>:  callq  0x1004a286a               ; symbol stub for: objc_retainAutoreleasedReturnValue
+    ...
+
+if we check out the value of rax before the objc_msgsend (which is where we fetch the `currentDocument` to pass as an argument to `-isEqual`), We have:
+
+    rax = 0x0000608000182560
+
+and if we view the object at this location in memory (by using the lldb command, `po`, which stands for "print object"), we get this:
+
+		po 0x0000608000182560
+
+->	<ImageDocument: 0x608000181fb0>
+		fileURL = file:///Users/mattao/Documents/Snagit/Autosaved%20Captures.localized/2015-08-25_17-49-27.snagproj
+		canvasRect = {{0, 0}, {500, 440}}
+		backgroundSize = {0, 0}
+		backgroundColor = NSCalibratedWhiteColorSpace 0 0
+		objects = (
+		)
+		flattenedObjects = (
+		)
+
+This is actually the `document` argument that is passed into `-setCurrentDocument`.  It was placed in the `rax` register from the `objc_storeStrong` call.
+
+       rax = 0x0000608000182560
+       rbx = 0x00006080001c02d0
+       rcx = 0x0000000000000035
+       rdx = 0x00006080001c02d0
+       rdi = 0x00006080001c02d0
+       rsi = 0x00007fff8c12884b  "currentDocument"
+       rbp = 0x00007fff5fbfe4f0
+       rsp = 0x00007fff5fbfe4b0
+        r8 = 0x000000000000007f
+        r9 = 0x0000608000182560
+       r10 = 0x0000000102860c50
+       r11 = 0x0000000100641918  (void *)0x00000001006418f0: EditorWindowController
+       r12 = 0x00006100000850c8
+       r13 = 0x0000000100558640  @"currentDocument"
+       r14 = 0x00007fff8ca9a0c0  libobjc.A.dylib`objc_msgSend
+       r15 = 0x00000001004f1302  "setCurrentDocument:"
+       rip = 0x0000000100105e49  Snagit`-[EditorWindowController setCurrentDocument:] + 57 at EditorWindowController.m:514
+    rflags = 0x0000000000000246
+        cs = 0x000000000000002b
+        fs = 0x0000000000000000
+        gs = 0x0000000000000000
+
+If we look at the other registers at this point, we can see clearly what method is going to be called w/ `objc_msgSend`.
+`rsi` is the selector (the method; more specifically, an accessor [more specifically, a getter]), currentDocument, 
+and `rdi` is the receiver, the `EditorWindowController`
+
+The returned value will be placed in the rax register.  We are expecting currentDocument (which if you look up at the source code is actually just a wrapper for `[self document]`)
+
+So... let's take a look at the registers after the `objc_msgSend`
+
+       rax = 0x0000618000183dc0
+       rbx = 0x00006080001c02d0
+       rcx = 0x0000000000000035
+       rdx = 0x00006080001c02d0
+       rdi = 0x00006080001c02d0
+       rsi = 0x00007fff8c0f8bfc  "document"
+       rbp = 0x00007fff5fbfe4f0
+       rsp = 0x00007fff5fbfe4b0
+        r8 = 0x000000000000007f
+        r9 = 0x0000608000182560
+       r10 = 0x0000000102115fc0
+       r11 = 0x00006100000850a0
+       r12 = 0x00006100000850c8
+       r13 = 0x0000000100558640  @"currentDocument"
+       r14 = 0x00007fff8ca9a0c0  libobjc.A.dylib`objc_msgSend
+       r15 = 0x00000001004f1302  "setCurrentDocument:"
+       rip = 0x0000000100105e52  Snagit`-[EditorWindowController setCurrentDocument:] + 66 at EditorWindowController.m:514
+    rflags = 0x0000000000000206
+        cs = 0x000000000000002b
+        fs = 0x0000000000000000
+        gs = 0x0000000000000000
+
+rax has changed now, and if we look at the object that this address (0x0000618000183dc0) is pointing at, we get this:
+
+		(lldb) po 0x0000618000183dc0
+
+->	107202385296832
+
+So what gives?  
+The pointer we are getting back from [self currentDocument] appears to not be pointing to a valid object anymore.
+
+This one had me stuck for a while, but I eventually figured out that when you `po` an address that doesn't point to an NSObject, for *whatever* reason, it prints out the decimal representation of the address...
+Surprisingly very confusing at first, I thought that number was just gibberish; but in fact (hexadecimal) 0x0000618000183dc0 <-> (decimal) 107202385296832
+
+So okay that helps, I can now just check out the data at address 0x0000618000183dc0 to see what's there.  Let's take a look at the first word at that address by using the Xcode Memory Browser:
+		
+		AD BE AD DE DE C0 DD BA.  
+
+Xcode memory browser displays bytes in reverse order, so the first word we have here is actually BADDC0DEDEADBEAD.  
+
+Notice something?  That is exactly the value that was stored in the rax register when we dereferenced.
+
+So what is this?
+
+Turns out, every NSObject has a hidden property called `isa`, which actually stands for "is a".  This points to a `Class` object that is primarily used to tell you the name of the class.
+
+This `isa` property is the first words in the allocated space in memory for the object.
+
+Great, we are talking business now.  This bus error appears to happen because we are trying to dereference a location in memory, looking for the value backed by the `isa` pointer.
+But when it tries to dereference 0xBADDC0DEDEADBEAD, the processor throws a bus error because this is not a valid physical address (not canonical, which is also why the original SIGBUS reported an address of 0x0, because non-canonical addresses get signaled as 0x0 [well technically, it's undefined, but anecdotally it will be 0x0])
+
+And this is perfect, because we can easily find resources as to why `isa` could be invalid.  
+As it turns out, when a object is released and marked as dead, the `isa` pointer is changed.
+
+So now we have a very clear story of what's happening.
+- The `[self currentDocument]` returns the `document` pointer
+- We are reading the object referenced by `document`, in order to compare it with `isEqual`
+- We successfully read an object, but crash upon trying to retain the object (the object would have been released after the comparison, if you look at instruction offset +114)
+- We know this is because we are trying to dereference the `isa` pointer, which is garbage
+- The `isa` pointer is garbage because the object has been released
+- This means that the object was valid when we tried to read it, but was released when we tried to retain it
+- So somewhere, a concurrent setter on the `document` is being called, possibly changing the type (because we subclass NSDocument w/ different children, this is definitely plausible)
+- This releases the original `document` object that was read.
+
+So how can we fix this?
+
+The first thing that I thought of was to make the `@property` atomic, which in theory would work-- except that we don't actually have access to the underlying `document` @property-- it exists through the Cocoa API under the `NSWindowController` class that we are inheriting.  Alternatively, we could make `currentDocument` an atomic @property, instead of wrapper accessor methods to `document`, but this seems silly because we would be retaining a property whose getter/setter go directly to another property.
+
+Then the worst thing happened.  I finally noticed that inside of `-setCurrentDocument`, we are calling `[*self* setDocument]`...
+It couldn't be...
+
+Yep, we already are overriding the setter for `document`
+
+		- (void)setDocument:(NSDocument *)document
+		{
+		 	if ( _shouldSetDocument )
+			{
+		      if (document)
+		      {
+		         [_editorViewController switchToEditorForDocument:(MediaDocument*)document];
+		      }
+		      
+		      [self willChangeValueForKey:@"currentDocument"];
+		      [self willChangeValueForKey:@"canSelectNextDocument"];
+		      [self willChangeValueForKey:@"canSelectPreviousDocument"];
+		      [self willChangeValueForKey:@"isVideoMode"];
+		      [super setDocument:document];
+		      [self updateWindowWithDocument:(MediaDocument*)document];
+		      [self didChangeValueForKey:@"currentDocument"];
+		      [self didChangeValueForKey:@"canSelectNextDocument"];
+		      [self didChangeValueForKey:@"canSelectPreviousDocument"];
+		      [self didChangeValueForKey:@"isVideoMode"];
+		      
+		      if ( [self isVideoMode] )
+		      {
+		         [_buttonBarController setExpanded:NO];
+		      }
+			}
+		}
+
+So setCurrentDocument doesn't even wrap the `NSWindowController`s `-setDocument`, it wraps our `EditorWindowController`s `-setDocument`.
+
+So now things become a little more clear. 
+There are places where we calling `[EditorWindowController setDocument:imageDocument]` and places where we are calling `[EditorWindowController setCurrentDocument:videoDocument]`, etc. etc.
+
+It appears that **`setCurrentDocument` serves no purpose.**
+
+If we look at the blame, here is the commit message when the method was added:
+
+		Anon Dev, July 29, 2009:
+
+		Merging singlewindowmultidocument branch with trunk
+
+		ci
+
+So... yeah.  
+I moved the `[document didFinishSettingDocument];` call inside of `-setCurrentDocument` into `-setDocument`
+Then deleted `-setCurrentDocument`, and rerouted all previous calls to that method to `-setDocument`.
+
+Now I am unable to reproduce the bug with my own testing.  It is entirely possible that it is still reproducable, because I was never able to reproduce it the same way our users were-- but I am pretty satisfied with my results.
+
+Does anybody have an experience similar to this, or have anything they could add? 
+
+
+
+
+
+
+
