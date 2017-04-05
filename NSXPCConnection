@@ -1,0 +1,58 @@
+Why NSXPCConnection
+- NSConnection not supported in Swift
+- XPCConnections are safer because endpoints are declared to conform to a protocol
+- Can determine if a connection has died
+- Messages are handled asynchronously, with error blocks (how do we send captures from caphelper back to editor? is that async?)
+- Designed so that messages re-establish a connection in the event that it has been terminated or invalidated
+
+
+
+
+Setup:
+NSXPCConnection can be created 3 ways: XPCService name, mach service name, with an NSXPCListenerEndpoint
+
+Two applications need to communicate with endpoint
+Need launch daemon, a mach service, to hold the endpoints
+
+Creating daemon:
+Daemon is a command line tool target, built within SmacitEditor.
+The executable product is copied into Snagit.app/Contents/Library/LaunchServices
+Use custom linker flags to link a info.plist and launchd.plist to the executable product
+
+Application launches, checks if daemon is running, if not needs to launch it.  
+Use ServiceManagement to run the daemon as a mach service.
+
+Both need to be signed with same cert in order for daemon to launch
+Need to use SMJobBless to modify the info.plists with the correct cert attributes, and to make sure the daemon will run.
+
+Daemon stores NSXPCListenerEndpoints, as well as ProcessID (foresight for side-by-side)
+
+NSXPCListener:
+Both daemon, and helper (editor in future too) need to conform to NSXPCListenerProtocol.
+Need to also reference NSXPCListener singleton (unique to process).
+NSXPCListener singleton sets daemon/helper/editor as delegate.
+NSXPCListener singleton has an NSXPCListenerEndpoint.  This is what's stored in daemon and accessed by sender to create NSXPCConnection
+
+Implement 1 method: -listener:shouldAcceptNewConnection.
+When a message is sent over an NSXPCConnection, this is the delegate method that gets the first call.  You decide whether or not the call should be accepted, then patch it along
+
+
+Sender:
+Needs to ask daemon for endpoint, to create an NSXPCConnection.  Retain that connection and the endpoint.  In the event the connection is invalidated, need to create a new one using endpoint
+Every time a message is sent, need to check the validity of the connection
+Ask connection for "RemoteObjectProxy" (the listener's delegate), and pass the message along.  A block argument can be included, for callbacks
+
+
+
+Issues:
+- Need to make changes in a lot of places
+- Saw an issue where helper doesn't quit normally.  Not sure if result of development
+- Making sure the daemon is launched properly.  Can it die when we need it?
+- Side-by-side
+
+Sandboxing
+- No idea how this will look in App Store
+- Need to connect to XPCService before daemon
+
+Not intended for inter-application communication.  Designed to communicate to a service that does a heavier task, that you want to be done asynchronously (separation of privileges, protection from crashes)
+- Fetching the endpoint from the daemon is a little sketchy.  Need to make sure daemon is launched, then wait until helper has launched
